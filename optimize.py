@@ -1,9 +1,11 @@
 ﻿import itertools
 import sys
+from contextlib import redirect_stdout
 
 import pandas as pd
 
 from backtest import Backtest
+from config import load_config
 from strategy import DonchianStrategy, GridStrategy
 
 
@@ -17,7 +19,7 @@ def load_data():
         sys.exit(1)
 
 
-def optimize_donchian(df):
+def optimize_donchian(df, cfg):
     print("\n--- Donchian Strategy Optimization ---")
 
     # 1h candles: 120(5d), 240(10d), 480(20d), 960(40d)
@@ -40,13 +42,22 @@ def optimize_donchian(df):
         use_atr = atr_thres > 0
         strategy = DonchianStrategy(window=window, use_atr_filter=use_atr, atr_threshold=atr_thres)
 
-        backtest = Backtest(initial_balance=1_000_000)
-        sys.stdout = open("/dev/null", "w")
-        portfolio, trade_log = backtest.run(df, strategy, sl_pct=sl, tp_pct=tp, trailing_pct=trailing)
-        sys.stdout = sys.__stdout__
+        backtest = Backtest(
+            initial_balance=float(cfg["backtest"]["initial_balance"]),
+            maker_fee=float(cfg["backtest"]["maker_fee_pct"]),
+            taker_fee=float(cfg["backtest"]["taker_fee_pct"]),
+            slippage_bps=float(cfg["backtest"]["slippage_bps"]),
+            spread_bps=float(cfg["backtest"]["spread_bps"]),
+            fill_ratio=float(cfg["backtest"]["fill_ratio"]),
+            trade_fraction=float(cfg["backtest"]["trade_fraction"]),
+        )
+        with open("/dev/null", "w", encoding="utf-8") as devnull:
+            with redirect_stdout(devnull):
+                portfolio, trade_log = backtest.run(df, strategy, sl_pct=sl, tp_pct=tp, trailing_pct=trailing)
 
-        final_val = portfolio[-1] if portfolio else 1_000_000
-        profit = final_val - 1_000_000
+        initial_balance = float(cfg["backtest"]["initial_balance"])
+        final_val = portfolio[-1] if portfolio else initial_balance
+        profit = final_val - initial_balance
         max_dd = backtest.calculate_drawdown(portfolio)
 
         results.append(
@@ -73,7 +84,7 @@ def optimize_donchian(df):
         )
 
 
-def optimize_grid(df):
+def optimize_grid(df, cfg):
     print("\n--- Grid Strategy Optimization ---")
 
     r_min = df["low"].min()
@@ -92,13 +103,22 @@ def optimize_grid(df):
             range_min=r_min, range_max=r_max, grid_num=grid_num, amount_per_grid=0.01, use_ema_filter=use_ema
         )
 
-        backtest = Backtest(initial_balance=1_000_000)
-        sys.stdout = open("/dev/null", "w")
-        portfolio, trade_log = backtest.run(df, strategy)
-        sys.stdout = sys.__stdout__
+        backtest = Backtest(
+            initial_balance=float(cfg["backtest"]["initial_balance"]),
+            maker_fee=float(cfg["backtest"]["maker_fee_pct"]),
+            taker_fee=float(cfg["backtest"]["taker_fee_pct"]),
+            slippage_bps=float(cfg["backtest"]["slippage_bps"]),
+            spread_bps=float(cfg["backtest"]["spread_bps"]),
+            fill_ratio=float(cfg["backtest"]["fill_ratio"]),
+            trade_fraction=float(cfg["backtest"]["trade_fraction"]),
+        )
+        with open("/dev/null", "w", encoding="utf-8") as devnull:
+            with redirect_stdout(devnull):
+                portfolio, trade_log = backtest.run(df, strategy)
 
-        final_val = portfolio[-1] if portfolio else 1_000_000
-        profit = final_val - 1_000_000
+        initial_balance = float(cfg["backtest"]["initial_balance"])
+        final_val = portfolio[-1] if portfolio else initial_balance
+        profit = final_val - initial_balance
         max_dd = backtest.calculate_drawdown(portfolio)
 
         results.append(
@@ -120,6 +140,7 @@ def optimize_grid(df):
 
 
 if __name__ == "__main__":
+    cfg = load_config()
     df = load_data()
-    optimize_donchian(df)
-    optimize_grid(df)
+    optimize_donchian(df, cfg)
+    optimize_grid(df, cfg)

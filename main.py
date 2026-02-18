@@ -1,10 +1,11 @@
-﻿import sys
 import os
+
 import pandas as pd
 
-from data_loader import fetch_data, save_to_csv
-from strategy import SmaStrategy, MacdStrategy, DonchianStrategy, GridStrategy
 from backtest import Backtest
+from config import load_config
+from data_loader import fetch_data, save_to_csv
+from strategy import DonchianStrategy, GridStrategy, MacdStrategy, SmaStrategy
 
 
 def _input_int(prompt, default):
@@ -15,18 +16,22 @@ def _input_float(prompt, default):
     return float(input(prompt) or default)
 
 
-def _parse_risk_inputs(strat_choice):
+def _parse_risk_inputs(strat_choice, cfg):
     """
-    Donchian(3)のみ、空Enter時に最適化済みデフォルト(5/15/5)を適用。
-    それ以外は空Enterで無効(None)。
+    Donchian(3) only: apply optimized defaults on empty Enter.
+    Others: empty Enter means disabled (None).
     """
     sl_pct = None
     tp_pct = None
     trailing_pct = None
 
-    sl_default = "5" if strat_choice == "3" else ""
-    tp_default = "15" if strat_choice == "3" else ""
-    ts_default = "5" if strat_choice == "3" else ""
+    donchian_sl = str(cfg["strategy_defaults"]["donchian_sl_pct"])
+    donchian_tp = str(cfg["strategy_defaults"]["donchian_tp_pct"])
+    donchian_ts = str(cfg["strategy_defaults"]["donchian_trailing_pct"])
+
+    sl_default = donchian_sl if strat_choice == "3" else ""
+    tp_default = donchian_tp if strat_choice == "3" else ""
+    ts_default = donchian_ts if strat_choice == "3" else ""
 
     sl_label = "損切り(Stop Loss) % "
     tp_label = "利確(Take Profit) % "
@@ -37,9 +42,9 @@ def _parse_risk_inputs(strat_choice):
     ts_prompt = f"{ts_label}(Enterで無し"
 
     if strat_choice == "3":
-        sl_prompt += ", default: 5"
-        tp_prompt += ", default: 15"
-        ts_prompt += ", default: 5"
+        sl_prompt += f", default: {donchian_sl}"
+        tp_prompt += f", default: {donchian_tp}"
+        ts_prompt += f", default: {donchian_ts}"
 
     sl_prompt += "): "
     tp_prompt += "): "
@@ -72,7 +77,7 @@ def run_fetch_data():
         print("数値を入力してください。")
 
 
-def run_backtest_mode():
+def run_backtest_mode(cfg):
     print("\n--- バックテストモード ---")
     if not os.path.exists("market_data.csv"):
         print("エラー: market_data.csv が見つかりません。先にデータ取得を実行してください。")
@@ -97,13 +102,14 @@ def run_backtest_mode():
     elif strat_choice == "2":
         strategy = MacdStrategy()
     elif strat_choice == "3":
-        # Profit-positive defaults from optimization
-        window = _input_int("期間 (default: 240): ", 240)
+        window_default = int(cfg["strategy_defaults"]["donchian_window"])
+        atr_default = float(cfg["strategy_defaults"]["donchian_atr_threshold_pct"])
+        window = _input_int(f"期間 (default: {window_default}): ", window_default)
         use_atr = input("ATRフィルターを使いますか？ (y/n, default: y): ")
         if use_atr.lower() == "n":
             strategy = DonchianStrategy(window=window, use_atr_filter=False)
         else:
-            atr_thres = _input_float("ATR閾値% (default: 0.3): ", 0.3)
+            atr_thres = _input_float(f"ATR閾値% (default: {atr_default}): ", atr_default)
             strategy = DonchianStrategy(window=window, use_atr_filter=True, atr_threshold=atr_thres / 100.0)
     elif strat_choice == "4":
         default_min = float(df["low"].min())
@@ -135,13 +141,21 @@ def run_backtest_mode():
     trailing_pct = None
     if strat_choice in ["1", "2", "3"]:
         print("\n--- リスク管理設定 ---")
-        sl_pct, tp_pct, trailing_pct = _parse_risk_inputs(strat_choice)
+        sl_pct, tp_pct, trailing_pct = _parse_risk_inputs(strat_choice, cfg)
 
-    backtest = Backtest(initial_balance=1_000_000)
+    backtest = Backtest(
+        initial_balance=float(cfg["backtest"]["initial_balance"]),
+        maker_fee=float(cfg["backtest"]["maker_fee_pct"]),
+        taker_fee=float(cfg["backtest"]["taker_fee_pct"]),
+        slippage_bps=float(cfg["backtest"]["slippage_bps"]),
+        spread_bps=float(cfg["backtest"]["spread_bps"]),
+        fill_ratio=float(cfg["backtest"]["fill_ratio"]),
+        trade_fraction=float(cfg["backtest"]["trade_fraction"]),
+    )
     backtest.run(df, strategy, sl_pct=sl_pct, tp_pct=tp_pct, trailing_pct=trailing_pct)
 
 
-def run_live_mode():
+def run_live_mode(cfg):
     print("\n--- ライブ運用モード ---")
     print("注意: テストモードでは注文を出さず、内部残高のみ更新します。")
 
@@ -163,20 +177,21 @@ def run_live_mode():
     elif strat_choice == "2":
         strategy = MacdStrategy()
     elif strat_choice == "3":
-        # Profit-positive defaults from optimization
-        window = _input_int("期間 (default: 240): ", 240)
+        window_default = int(cfg["strategy_defaults"]["donchian_window"])
+        atr_default = float(cfg["strategy_defaults"]["donchian_atr_threshold_pct"])
+        window = _input_int(f"期間 (default: {window_default}): ", window_default)
         use_atr = input("ATRフィルターを使いますか？ (y/n, default: y): ")
         if use_atr.lower() == "n":
             strategy = DonchianStrategy(window=window, use_atr_filter=False)
         else:
-            atr_thres = _input_float("ATR閾値% (default: 0.3): ", 0.3)
+            atr_thres = _input_float(f"ATR閾値% (default: {atr_default}): ", atr_default)
             strategy = DonchianStrategy(window=window, use_atr_filter=True, atr_threshold=atr_thres / 100.0)
     else:
         print("不正な選択です。終了します。")
         return
 
     print("\n--- リスク管理設定 ---")
-    sl_pct, tp_pct, trailing_pct = _parse_risk_inputs(strat_choice)
+    sl_pct, tp_pct, trailing_pct = _parse_risk_inputs(strat_choice, cfg)
 
     amount = _input_float("1回の注文数量(BTC) (default: 0.001): ", 0.001)
 
@@ -189,11 +204,16 @@ def run_live_mode():
         tp_pct=tp_pct,
         trailing_pct=trailing_pct,
         test_mode=test_mode,
+        virtual_balance=float(cfg["live"]["virtual_balance"]),
+        taker_fee_pct=float(cfg["live"]["taker_fee_pct"]),
+        slippage_bps=float(cfg["live"]["slippage_bps"]),
     )
-    trader.run()
+    trader.run(interval_sec=int(cfg["live"]["interval_sec"]))
 
 
 def main():
+    cfg = load_config()
+
     print("=== 自動売買ツール (Bitbank) ===")
     print("1. データ取得")
     print("2. バックテスト")
@@ -204,9 +224,9 @@ def main():
     if choice == "1":
         run_fetch_data()
     elif choice == "2":
-        run_backtest_mode()
+        run_backtest_mode(cfg)
     elif choice == "3":
-        run_live_mode()
+        run_live_mode(cfg)
     else:
         print("不正な選択です。")
 

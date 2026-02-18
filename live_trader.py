@@ -7,7 +7,19 @@ from datetime import datetime
 
 
 class LiveTrader:
-    def __init__(self, strategy, symbol="BTC/JPY", amount=0.001, sl_pct=None, tp_pct=None, trailing_pct=None, test_mode=True):
+    def __init__(
+        self,
+        strategy,
+        symbol="BTC/JPY",
+        amount=0.001,
+        sl_pct=None,
+        tp_pct=None,
+        trailing_pct=None,
+        test_mode=True,
+        virtual_balance=1_000_000.0,
+        taker_fee_pct=0.12,
+        slippage_bps=0.0,
+    ):
         """
         Live trader / paper trader.
 
@@ -20,6 +32,8 @@ class LiveTrader:
         self.tp_pct = tp_pct
         self.trailing_pct = trailing_pct
         self.test_mode = test_mode
+        self.taker_fee = taker_fee_pct / 100.0
+        self.slippage_rate = slippage_bps / 10000.0
 
         api_key = os.environ.get("BITBANK_API_KEY")
         api_secret = os.environ.get("BITBANK_API_SECRET")
@@ -36,9 +50,21 @@ class LiveTrader:
         self.position = None
         self.highest_price = 0.0
 
-        self.virtual_balance = 1_000_000.0
+        self.virtual_balance = virtual_balance
         self.virtual_btc = 0.0
         self.total_profit = 0.0
+
+    def _apply_slippage(self, price, side):
+        if side == "buy":
+            return price * (1.0 + self.slippage_rate)
+        if side == "sell":
+            return price * (1.0 - self.slippage_rate)
+        return price
+
+    def _get_latest_confirmed_signal(self, signals):
+        if len(signals) < 2 or "signal" not in signals.columns:
+            return None
+        return signals.iloc[-2]["signal"]
 
     def fetch_recent_data(self, limit=500):
         """Fetch recent 1h OHLCV data."""
@@ -57,34 +83,43 @@ class LiveTrader:
 
         if self.test_mode:
             if side == "buy":
-                cost = current_price * self.amount
-                if self.virtual_balance >= cost:
-                    self.virtual_balance -= cost
+                exec_price = self._apply_slippage(current_price, "buy")
+                cost = exec_price * self.amount
+                fee = cost * self.taker_fee
+                total_cost = cost + fee
+                if self.virtual_balance >= total_cost:
+                    self.virtual_balance -= total_cost
                     self.virtual_btc += self.amount
-                    print(f"[TEST] BUY {self.amount} BTC @ {current_price:,.0f} JPY")
+                    print(f"[TEST] BUY {self.amount} BTC @ {exec_price:,.0f} JPY (fee: {fee:,.0f})")
                     print(f"       Balance: {self.virtual_balance:,.0f} JPY, BTC: {self.virtual_btc:.4f}")
                 else:
                     print(
-                        f"[TEST] BUY skipped: required {cost:,.0f} > balance {self.virtual_balance:,.0f}"
+                        f"[TEST] BUY skipped: required {total_cost:,.0f} > balance {self.virtual_balance:,.0f}"
                     )
                     return None
 
+                return {"price": exec_price, "amount": self.amount, "fee": fee}
+
             elif side == "sell":
-                revenue = current_price * self.amount
+                exec_price = self._apply_slippage(current_price, "sell")
+                revenue = exec_price * self.amount
+                fee = revenue * self.taker_fee
+                net_revenue = revenue - fee
                 if self.virtual_btc >= self.amount * 0.99:
-                    self.virtual_balance += revenue
+                    self.virtual_balance += net_revenue
                     self.virtual_btc -= self.amount
 
                     if self.position:
                         entry = self.position["entry_price"]
-                        pnl = (current_price - entry) * self.amount
+                        entry_fee = self.position.get("entry_fee", 0.0)
+                        pnl = ((exec_price - entry) * self.amount) - entry_fee - fee
                         self.total_profit += pnl
                         print(
-                            f"[TEST] SELL {self.amount} BTC @ {current_price:,.0f} JPY "
+                            f"[TEST] SELL {self.amount} BTC @ {exec_price:,.0f} JPY "
                             f"(PnL: {pnl:+,.0f} JPY)"
                         )
                     else:
-                        print(f"[TEST] SELL {self.amount} BTC @ {current_price:,.0f} JPY")
+                        print(f"[TEST] SELL {self.amount} BTC @ {exec_price:,.0f} JPY")
 
                     print(f"       Balance: {self.virtual_balance:,.0f} JPY, BTC: {self.virtual_btc:.4f}")
                     print(f"       Total Profit: {self.total_profit:+,.0f} JPY")
@@ -92,12 +127,12 @@ class LiveTrader:
                     print("[TEST] SELL skipped: insufficient BTC.")
                     return None
 
-            return {"price": current_price, "amount": self.amount}
+                return {"price": exec_price, "amount": self.amount, "fee": fee}
 
         try:
             order = self.exchange.create_market_order(self.symbol, side, self.amount)
             print(f"Live order sent: {order}")
-            return {"price": self.get_current_price(), "amount": self.amount}
+            return {"price": self.get_current_price(), "amount": self.amount, "fee": 0.0}
         except Exception as e:
             print(f"Order error: {e}")
             return None
@@ -173,13 +208,21 @@ class LiveTrader:
                     continue
 
                 signals = self.strategy.generate_signals(df)
-                latest_signal = signals.iloc[-1]["signal"]
+                latest_signal = self._get_latest_confirmed_signal(signals)
+                if latest_signal is None:
+                    print("Not enough candles yet - waiting for confirmed bar.")
+                    time.sleep(interval_sec)
+                    continue
 
                 if latest_signal == 1.0 and self.position is None:
                     print("BUY signal")
                     res = self.execute_order("buy", current_price)
                     if res:
-                        self.position = {"amount": self.amount, "entry_price": res["price"]}
+                        self.position = {
+                            "amount": self.amount,
+                            "entry_price": res["price"],
+                            "entry_fee": res.get("fee", 0.0),
+                        }
                         self.highest_price = res["price"]
 
                 elif latest_signal == -1.0 and self.position is not None:

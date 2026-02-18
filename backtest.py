@@ -3,17 +3,41 @@ import numpy as np
 
 
 class Backtest:
-    def __init__(self, initial_balance=1000000, maker_fee=-0.02, taker_fee=0.12):
+    def __init__(
+        self,
+        initial_balance=1000000,
+        maker_fee=-0.02,
+        taker_fee=0.12,
+        slippage_bps=0.0,
+        spread_bps=0.0,
+        fill_ratio=1.0,
+        trade_fraction=1.0,
+    ):
         """
         initial_balance: initial JPY balance
         maker_fee: maker fee rate in % (negative means rebate)
         taker_fee: taker fee rate in %
+        slippage_bps: per-trade slippage in bps (1 bps = 0.01%)
+        spread_bps: simulated spread in bps (applied half each side)
+        fill_ratio: fill ratio per execution (0-1)
+        trade_fraction: fraction of available cash to use on each entry (0-1)
         """
         self.initial_balance = initial_balance
         self.maker_fee = maker_fee / 100.0
         self.taker_fee = taker_fee / 100.0
+        self.slippage_rate = slippage_bps / 10000.0
+        self.spread_rate = spread_bps / 10000.0
+        self.fill_ratio = max(0.0, min(float(fill_ratio), 1.0))
+        self.trade_fraction = max(0.0, min(float(trade_fraction), 1.0))
 
         self.reset()
+
+    def _apply_slippage(self, price, side):
+        if side == "buy":
+            return price * (1.0 + (self.spread_rate / 2.0)) * (1.0 + self.slippage_rate)
+        if side == "sell":
+            return price * (1.0 - (self.spread_rate / 2.0)) * (1.0 - self.slippage_rate)
+        return price
 
     def reset(self):
         self.balance = self.initial_balance
@@ -115,16 +139,22 @@ class Backtest:
                         exit_price = ts_price
 
                 if is_exit:
-                    revenue = self.position_amt * exit_price
+                    sold_amount = self.position_amt * self.fill_ratio
+                    if sold_amount <= 0:
+                        current_val = self.balance + (self.position_amt * price)
+                        self.portfolio_values.append(current_val)
+                        continue
+                    exec_exit_price = self._apply_slippage(exit_price, "sell")
+                    revenue = sold_amount * exec_exit_price
                     fee = revenue * fee_rate
-                    self.balance = revenue - fee
-                    self.position_amt = 0.0
+                    self.balance += revenue - fee
+                    self.position_amt -= sold_amount
                     self.trade_log.append(
                         {
                             "timestamp": timestamp,
                             "type": f"SELL ({exit_reason})",
-                            "price": exit_price,
-                            "amount": 0.0,
+                            "price": exec_exit_price,
+                            "amount": sold_amount,
                             "fee": fee,
                         }
                     )
@@ -132,37 +162,51 @@ class Backtest:
                     continue
 
             if signal == 1.0 and self.position_amt == 0.0:
-                fee = self.balance * fee_rate
-                actual_amount = (self.balance - fee) / price
+                budget = self.balance * self.trade_fraction
+                if budget <= 0:
+                    current_val = self.balance + (self.position_amt * price)
+                    self.portfolio_values.append(current_val)
+                    continue
+                exec_buy_price = self._apply_slippage(price, "buy")
+                intended_amount = budget / (exec_buy_price * (1.0 + fee_rate))
+                actual_amount = intended_amount * self.fill_ratio
+                cost = actual_amount * exec_buy_price
+                fee = cost * fee_rate
 
-                self.position_amt = actual_amount
-                self.avg_entry_price = price
-                self.balance = 0.0
-                highest_price_since_entry = price
+                self.position_amt += actual_amount
+                self.avg_entry_price = exec_buy_price
+                self.balance -= cost + fee
+                highest_price_since_entry = exec_buy_price
 
                 self.trade_log.append(
                     {
                         "timestamp": timestamp,
                         "type": "BUY",
-                        "price": price,
+                        "price": exec_buy_price,
                         "amount": actual_amount,
                         "fee": fee,
                     }
                 )
 
             elif signal == -1.0 and self.position_amt > 0.0:
-                revenue = self.position_amt * price
+                sold_amount = self.position_amt * self.fill_ratio
+                if sold_amount <= 0:
+                    current_val = self.balance + (self.position_amt * price)
+                    self.portfolio_values.append(current_val)
+                    continue
+                exec_sell_price = self._apply_slippage(price, "sell")
+                revenue = sold_amount * exec_sell_price
                 fee = revenue * fee_rate
 
-                self.balance = revenue - fee
-                self.position_amt = 0.0
+                self.balance += revenue - fee
+                self.position_amt -= sold_amount
 
                 self.trade_log.append(
                     {
                         "timestamp": timestamp,
                         "type": "SELL (SIGNAL)",
-                        "price": price,
-                        "amount": self.position_amt,
+                        "price": exec_sell_price,
+                        "amount": sold_amount,
                         "fee": fee,
                     }
                 )
